@@ -30,3 +30,6 @@ slicposterizer = "slicposterizer:main"
 members = [
     "SLIC-Posterizer",
 ]
+
+[tool.setuptools]
+py-modules = ["slicposterizer"]
