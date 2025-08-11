@@ -329,7 +329,7 @@ class SLICPosterizer:
         palette_rgb, palette_lab = self._extract_palette(img_rgb, segments)
         for i, color in enumerate(palette_rgb):
             rgb_255 = (color * 255).astype(np.uint8)
-            logger.info(f"  Color {i+1}: RGB{tuple(rgb_255)}")
+            logger.info(f"  Color {i+1}: RGB{tuple(rgb_255.tolist())}")
 
         return segments, palette_rgb, palette_lab
 
@@ -766,23 +766,17 @@ def main():
 
     args = parser.parse_args()
 
-    # Determine input source and output path based on stdin vs file input
     if not sys.stdin.isatty():
-        # Reading from stdin
-        if args.input and not args.output:
-            # Case: cat image.jpg | slicposterizer output.jpg
-            input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
-            output_path = args.input  # First arg is actually the output path
-        elif args.output and not args.input:
-            # Case: cat image.jpg | slicposterizer --some-flags output.jpg  
-            input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
-            output_path = args.output
+        if not args.output and not args.input:
+            parser.error("Output path required when reading from stdin.")
+        if args.output is None:
+            output_path = args.input
         else:
-            parser.error("When reading from stdin, specify exactly one argument for the output path.")
+            output_path = args.output
+        input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
     else:
-        # Reading from file
         if not args.input or not args.output:
-            parser.error("Both input and output paths are required when not reading from stdin.")
+            parser.error("Both input and output paths are required unless piping data into stdin.")
         input_data = args.input
         output_path = args.output
 
