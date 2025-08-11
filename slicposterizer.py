@@ -24,6 +24,7 @@ import logging
 import sys
 import time
 
+from io import BytesIO
 from pathlib import Path
 from typing import Tuple
 
@@ -217,24 +218,39 @@ class SLICPosterizer:
         return posterized, final_weights, palette_rgb, segments
 
     # Image I/O and preprocessing
-    def load_image(self, path: Path) -> np.ndarray:
+    def load_image(self, source: Path | Image.Image | None) -> np.ndarray:
         """
-        Reads an image from the given file path, converting it into a standard
+        Reads an image from the given file source, converting it into a standard
         RGB numpy array with 8-bit color channels.
         It raises errors if the file is missing or cannot be loaded properly,
         ensuring the rest of the pipeline starts with a valid image.
-        """
-        if isinstance(path, str):
-            path = Path(path)
 
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+        Source parameter can be stdin, an Image, or a Path to an image file
+        """
+
+        if isinstance(source, Image.Image):
+            return np.array(source.convert("RGB"))
+
+
+        if isinstance(source, str):
+            source = Path(source)
+
+
+        if source is None or source == Path("-"):
+            if sys.stdin.isatty():
+                raise ValueError("No input source provided and stdin is not piped.")
+            source, source_name = sys.stdin.buffer, "stdin"
+        else:
+
+            if not source.exists():
+                raise FileNotFoundError(f"File not found: {source}")
+            source, source_name = source, str(source)
 
         try:
-            with Image.open(path) as img:
+            with Image.open(source) as img:
                 return np.array(img.convert("RGB"))
         except Exception as e:
-            raise ValueError(f"Failed to load image: {e}") from e
+            raise ValueError(f"Failed to load image from {source_name}: {e}") from e
 
     def save_image(self, img: np.ndarray, path: Path, quality: int = 95) -> None:
         """
@@ -601,7 +617,6 @@ class SLICPosterizer:
         reconstructed = weights_per_pixel @ palette_rgb
         return np.clip(reconstructed, 0, 1)
 
-    # Edge detection
     def _detect_edges(
         self,
         img_rgb_u8: np.ndarray,
@@ -683,9 +698,9 @@ class SLICPosterizer:
 
 
 def posterize(
-    input_path: Path,
+    input_path: Path | Image.Image,
     output_path: Path,
-    *,  # To ensure all following are kwargs
+    *,
     num_colors: int = 52,
     blur_radius: float = 1.5,
     edge_threshold: float = 0.1,
@@ -701,7 +716,7 @@ def posterize(
     overlay_superpixels: bool = False,
 ):
     """
-    Run the posterization pipeline on an image file with specified parameters.
+    Run the posterization pipeline on an image file or loaded image.
     """
     posterizer = SLICPosterizer(
         num_colors=num_colors,
@@ -731,70 +746,50 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument("input", help="Input image path")
-    parser.add_argument("output", help="Output posterized image path")
+    parser.add_argument("input", nargs="?", help="Input image path", default=None)
+    parser.add_argument("output", nargs="?", help="Output posterized image path")
 
-    parser.add_argument(
-        "-m", "--mixing", help="Output prefix for additive mixing layers"
-    )
+    parser.add_argument("-c", "--colors", type=int, default=64, help="Number of colors in palette")
+    parser.add_argument("-b", "--blur", type=float, default=1, help="Blur radius for smoothing")
+    parser.add_argument("-s", "--smoothing", type=int, default=3, choices=range(1, 11), metavar="[1-10]",
+                        help="Smoothing strength level (1-10)")
+    parser.add_argument("-S", "--superpixels", type=int, default=4500, help="Number of superpixels")
+    parser.add_argument("--compactness", type=float, default=15.0, help="SLIC superpixel compactness parameter")
+    parser.add_argument("--overlay", action="store_true", help="Overlay superpixel boundaries on the final image")
+    parser.add_argument("-m", "--mixing", help="Output prefix for additive mixing layers")
     parser.add_argument("-p", "--palette", help="Output path for palette swatch")
-    parser.add_argument(
-        "-c", "--colors", type=int, default=64, help="Number of colors in palette"
-    )
-    parser.add_argument(
-        "-S", "--superpixels", type=int, default=4500, help="Number of superpixels"
-    )
-    parser.add_argument(
-        "--compactness",
-        type=float,
-        default=15.0,
-        help="SLIC superpixel compactness parameter",
-    )
-    parser.add_argument(
-        "-b", "--blur", type=float, default=1, help="Blur radius for smoothing"
-    )
-    parser.add_argument(
-        "-e",
-        "--edge-threshold",
-        type=float,
-        default=0.1,
-        help="Edge detection threshold",
-    )
-    parser.add_argument(
-        "-d", "--downsample", type=int, default=1, help="Downsample factor (>=1)"
-    )
-    parser.add_argument(
-        "--no-edge-preserve", action="store_true", help="Disable edge preservation"
-    )
-    parser.add_argument(
-        "--detail-blend",
-        type=float,
-        default=0.1,
-        help="Blend factor for detail preservation",
-    )
-    parser.add_argument(
-        "--quality", type=int, default=95, help="JPEG quality (if saving JPEG)"
-    )
-    parser.add_argument(
-        "-s",
-        "--smoothing",
-        type=int,
-        default=3,
-        choices=range(1, 11),
-        metavar="[1-10]",
-        help="Smoothing strength level (1-10)",
-    )
-    parser.add_argument(
-        "--overlay",
-        action="store_true",
-        help="Overlay superpixel boundaries on the final image",
-    )
+    parser.add_argument("-e", "--edge-threshold", type=float, default=0.1, help="Edge detection threshold")
+    parser.add_argument("-d", "--downsample", type=int, default=1, help="Downsample factor (>=1)")
+    parser.add_argument("--detail-blend", type=float, default=0.1, help="Blend factor for detail preservation")
+    parser.add_argument("--quality", type=int, default=95, help="JPEG quality (if saving JPEG)")
+    parser.add_argument("--no-edge-preserve", action="store_true", help="Disable edge preservation")
 
     args = parser.parse_args()
+
+    # Determine input source and output path based on stdin vs file input
+    if not sys.stdin.isatty():
+        # Reading from stdin
+        if args.input and not args.output:
+            # Case: cat image.jpg | slicposterizer output.jpg
+            input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
+            output_path = args.input  # First arg is actually the output path
+        elif args.output and not args.input:
+            # Case: cat image.jpg | slicposterizer --some-flags output.jpg  
+            input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
+            output_path = args.output
+        else:
+            parser.error("When reading from stdin, specify exactly one argument for the output path.")
+    else:
+        # Reading from file
+        if not args.input or not args.output:
+            parser.error("Both input and output paths are required when not reading from stdin.")
+        input_data = args.input
+        output_path = args.output
+
     try:
         posterize(
-            input_path=args.input,
-            output_path=args.output,
+            input_path=input_data,
+            output_path=output_path,
             num_colors=args.colors,
             blur_radius=args.blur,
             edge_threshold=args.edge_threshold,
@@ -811,6 +806,7 @@ def main():
         )
     except Exception as e:
         logger.error(f"Processing failed: {e}")
+        raise Exception from e
         sys.exit(1)
 
 
