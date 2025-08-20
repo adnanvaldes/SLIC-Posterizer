@@ -231,10 +231,8 @@ class SLICPosterizer:
         if isinstance(source, Image.Image):
             return np.array(source.convert("RGB"))
 
-
         if isinstance(source, str):
             source = Path(source)
-
 
         if source is None or source == Path("-"):
             if sys.stdin.isatty():
@@ -749,20 +747,61 @@ def main():
     parser.add_argument("input", nargs="?", help="Input image path", default=None)
     parser.add_argument("output", nargs="?", help="Output posterized image path")
 
-    parser.add_argument("-c", "--colors", type=int, default=64, help="Number of colors in palette")
-    parser.add_argument("-b", "--blur", type=float, default=1, help="Blur radius for smoothing")
-    parser.add_argument("-s", "--smoothing", type=int, default=3, choices=range(1, 11), metavar="[1-10]",
-                        help="Smoothing strength level (1-10)")
-    parser.add_argument("-S", "--superpixels", type=int, default=4500, help="Number of superpixels")
-    parser.add_argument("--compactness", type=float, default=15.0, help="SLIC superpixel compactness parameter")
-    parser.add_argument("--overlay", action="store_true", help="Overlay superpixel boundaries on the final image")
-    parser.add_argument("-m", "--mixing", help="Output prefix for additive mixing layers")
+    parser.add_argument(
+        "-c", "--colors", type=int, default=64, help="Number of colors in palette"
+    )
+    parser.add_argument(
+        "-b", "--blur", type=float, default=1, help="Blur radius for smoothing"
+    )
+    parser.add_argument(
+        "-s",
+        "--smoothing",
+        type=int,
+        default=3,
+        choices=range(1, 11),
+        metavar="[1-10]",
+        help="Smoothing strength level (1-10)",
+    )
+    parser.add_argument(
+        "-S", "--superpixels", type=int, default=4500, help="Number of superpixels"
+    )
+    parser.add_argument(
+        "--compactness",
+        type=float,
+        default=15.0,
+        help="SLIC superpixel compactness parameter",
+    )
+    parser.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Overlay superpixel boundaries on the final image",
+    )
+    parser.add_argument(
+        "-m", "--mixing", help="Output prefix for additive mixing layers"
+    )
     parser.add_argument("-p", "--palette", help="Output path for palette swatch")
-    parser.add_argument("-e", "--edge-threshold", type=float, default=0.1, help="Edge detection threshold")
-    parser.add_argument("-d", "--downsample", type=int, default=1, help="Downsample factor (>=1)")
-    parser.add_argument("--detail-blend", type=float, default=0.1, help="Blend factor for detail preservation")
-    parser.add_argument("--quality", type=int, default=95, help="JPEG quality (if saving JPEG)")
-    parser.add_argument("--no-edge-preserve", action="store_true", help="Disable edge preservation")
+    parser.add_argument(
+        "-e",
+        "--edge-threshold",
+        type=float,
+        default=0.1,
+        help="Edge detection threshold",
+    )
+    parser.add_argument(
+        "-d", "--downsample", type=int, default=1, help="Downsample factor (>=1)"
+    )
+    parser.add_argument(
+        "--detail-blend",
+        type=float,
+        default=0.1,
+        help="Blend factor for detail preservation",
+    )
+    parser.add_argument(
+        "--quality", type=int, default=95, help="JPEG quality (if saving JPEG)"
+    )
+    parser.add_argument(
+        "--no-edge-preserve", action="store_true", help="Disable edge preservation"
+    )
 
     args = parser.parse_args()
 
@@ -776,33 +815,31 @@ def main():
         input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
     else:
         if not args.input or not args.output:
-            parser.error("Both input and output paths are required unless piping data into stdin.")
+            parser.error(
+                "Both input and output paths are required unless piping data into stdin."
+            )
         input_data = args.input
         output_path = args.output
 
-    try:
-        posterize(
-            input_path=input_data,
-            output_path=output_path,
-            num_colors=args.colors,
-            blur_radius=args.blur,
-            edge_threshold=args.edge_threshold,
-            downsample_factor=args.downsample,
-            preserve_edges=not args.no_edge_preserve,
-            num_superpixels=args.superpixels,
-            superpixel_compactness=args.compactness,
-            detail_blend_strength=args.detail_blend,
-            smoothing=args.smoothing,
-            palette_path=args.palette,
-            mixing_prefix=args.mixing,
-            quality=args.quality,
-            overlay_superpixels=args.overlay,
-        )
-    except Exception as e:
-        logger.error(f"Processing failed: {e}")
-        raise Exception from e
-        sys.exit(1)
+    posterize(
+        input_path=input_data,
+        output_path=output_path,
+        num_colors=args.colors,
+        blur_radius=args.blur,
+        edge_threshold=args.edge_threshold,
+        downsample_factor=args.downsample,
+        preserve_edges=not args.no_edge_preserve,
+        num_superpixels=args.superpixels,
+        superpixel_compactness=args.compactness,
+        detail_blend_strength=args.detail_blend,
+        smoothing=args.smoothing,
+        palette_path=args.palette,
+        mixing_prefix=args.mixing,
+        quality=args.quality,
+        overlay_superpixels=args.overlay,
+    )
 
 
 if __name__ == "__main__":
     main()
+
