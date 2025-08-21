@@ -122,6 +122,8 @@ class SLICPosterizer:
         detail_blend_strength: float = 0.1,
         smoothing: int = 5,
         overlay_superpixels: bool = False,
+        chunk_size: int | None = None,
+        low_memory: bool = False,
     ) -> None:
         if num_colors < 2:
             raise ValueError("Number of colors must be at least 2.")
@@ -131,6 +133,13 @@ class SLICPosterizer:
 
         if not (0.01 <= edge_threshold <= 1.0):
             raise ValueError("edge_threshold must be between 0.01 and 1.0")
+
+        if low_memory:
+            logger.info("Low memory mode: reducing superpixels and colors")
+            num_superpixels = min(num_superpixels, 2000)
+            num_colors = min(num_colors, 50)
+            preserve_edges = False
+            overlay_superpixels = False
 
         self.num_colors = num_colors
         self.blur_radius = blur_radius
@@ -142,6 +151,8 @@ class SLICPosterizer:
         self.detail_blend_strength = detail_blend_strength
         self.smoothing = smoothing
         self.overlay_superpixels = overlay_superpixels
+        self.chunk_size = chunk_size
+        self.low_memory = low_memory
 
     @log_method(log_time=True)
     def posterize(
@@ -151,6 +162,7 @@ class SLICPosterizer:
         palette_path: Path | str | None = None,
         mixing_prefix: Path | str | None = None,
         quality: int = 95,
+        strict_size: int | None = None,
     ) -> None:
         """
         This is the main user-facing method. It loads an input image, optionally downsamples it to speed up processing,
@@ -160,17 +172,37 @@ class SLICPosterizer:
         It also optionally saves a color palette swatch and additive color layers for further use.
         """
         image = self.load_image(input_path)
+
+        if strict_size:
+            h, w = image.shape[:2]
+            if w >= h:
+                new_w = strict_size
+                new_h = int(h * (strict_size / w))
+            else:
+                new_h = strict_size
+                new_w = int(w * (strict_size / h))
+
+            logger.info(f"Resizing image to {new_w}x{new_h} (keeping aspect ratio)")
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        original_shape = image.shape
         image = self.downsample_image(image)
 
-        posterized, weights, palette, segments = self.process(image)
-        posterized = self.upsample_image(posterized, image.shape)
+        if self.chunk_size:
+            posterized, weights, palette, segments = self.process_chunked(image)
+        else:
+            posterized, weights, palette, segments = self.process(image)
+
+        posterized = self.upsample_image(posterized, original_shape)
 
         if self.overlay_superpixels:
             # Upsample segments if needed
             if self.downsample_factor > 1:
-                h, w = image.shape[:2]
+                original_h, original_w = original_shape[:2]
                 upsampled_segments = cv2.resize(
-                    segments.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST
+                    segments.astype(np.float32),
+                    (original_w, original_h),
+                    interpolation=cv2.INTER_NEAREST,
                 ).astype(segments.dtype)
             else:
                 upsampled_segments = segments
@@ -205,17 +237,64 @@ class SLICPosterizer:
         simple_post, img_lab = self._simple_posterize(img_rgb, palette_lab, palette_rgb)
 
         if self.preserve_edges:
-            img_lab = skcolor.rgb2lab(img_rgb)
             simple_post = self._preserve_detail(
                 img_rgb, img_lab, segments, palette_lab, palette_rgb, simple_post
             )
 
         posterized = self._smooth(simple_post)
-        posterized, final_weights = self._final_quantize(
-            posterized, palette_lab, palette_rgb
-        )
+        posterized, weights = self._final_quantize(posterized, palette_lab, palette_rgb)
 
-        return posterized, final_weights, palette_rgb, segments
+        return posterized, weights, palette_rgb, segments
+
+    @log_method(log_time=True)
+    def process_chunked(
+        self, image: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Posterization using SLIC superpixels, processed in chunks
+
+        This method performs the same task as `process` above, but divides
+        the image into chunks to reduce memory usage. To preserve colors accross
+        the image the segments and palette are processed prior to chunking.
+        """
+        img_rgb = self._preprocess(image)
+        h, w = img_rgb.shape[:2]
+        segments, palette_rgb, palette_lab = self._copmute_segments_and_palette(img_rgb)
+
+        posterized = np.zeros_like(img_rgb)
+        weights = np.zeros((h, w, len(palette_rgb)), dtype=np.float32)
+
+        for i in range(0, h, self.chunk_size):
+            for j in range(0, w, self.chunk_size):
+                end_i = min(i + self.chunk_size, h)
+                end_j = min(j + self.chunk_size, w)
+
+                chunk = img_rgb[i:end_i, j:end_j]
+                chunk_segments = segments[i:end_i, j:end_j]
+
+                chunk_simple_post, chunk_lab = self._simple_posterize(
+                    chunk, palette_lab, palette_rgb
+                )
+
+                if self.preserve_edges:
+                    chunk_simple_post = self._preserve_detail(
+                        chunk,
+                        chunk_lab,
+                        chunk_segments,
+                        palette_lab,
+                        palette_rgb,
+                        chunk_simple_post,
+                    )
+
+                chunk_smooth = self._smooth(chunk_simple_post)
+
+                chunk_quantized, chunk_weights = self._final_quantize(
+                    chunk_smooth, palette_lab, palette_rgb
+                )
+
+                posterized[i:end_i, j:end_j] = chunk_quantized
+                weights[i:end_i, j:end_j] = chunk_weights
+
+        return posterized, weights, palette_rgb, segments
 
     # Image I/O and preprocessing
     def load_image(self, source: Path | Image.Image | str | None) -> np.ndarray:
@@ -256,6 +335,9 @@ class SLICPosterizer:
         and saves it to the specified path using Pillow.
         Quality parameter controls compression for formats like JPEG.
         """
+        if isinstance(path, str):
+            path = Path(path)
+
         img_u8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
         Image.fromarray(img_u8).save(path, quality=quality)
         logger.info(f"Saved image: {path}")
@@ -668,7 +750,7 @@ class SLICPosterizer:
         self,
         mixing_weights: np.ndarray,
         palette_rgb: np.ndarray,
-        prefix: Path,
+        prefix: Path | str,
     ) -> None:
         """
         Saves one image per palette color showing that color's contribution and a mask.
@@ -712,6 +794,9 @@ def posterize(
     mixing_prefix: Path | str | None = None,
     quality: int = 95,
     overlay_superpixels: bool = False,
+    chunk_size: int | None = None,
+    low_memory: bool = False,
+    strict_size: int | None = None,
 ):
     """
     Run the posterization pipeline on an image file or loaded image.
@@ -727,6 +812,8 @@ def posterize(
         detail_blend_strength=detail_blend_strength,
         smoothing=smoothing,
         overlay_superpixels=overlay_superpixels,
+        chunk_size=chunk_size,
+        low_memory=low_memory,
     )
 
     posterizer.posterize(
@@ -735,6 +822,7 @@ def posterize(
         palette_path=palette_path,
         mixing_prefix=mixing_prefix,
         quality=quality,
+        strict_size=strict_size,
     )
 
 
@@ -803,6 +891,24 @@ def main():
         "--no-edge-preserve", action="store_true", help="Disable edge preservation"
     )
 
+    parser.add_argument(
+        "--strict-size",
+        type=int,
+        metavar="MAX_DIM",
+        help="Resize longest image dimension to this value, keeping aspect ratio (e.g. 1920)",
+    )
+
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        help="Process image in chunks of this size for memory efficiency (enables chunked mode)",
+    )
+    parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Enable low memory mode (reduces superpixels and colors)",
+    )
+
     args = parser.parse_args()
 
     if not sys.stdin.isatty():
@@ -841,9 +947,11 @@ def main():
         mixing_prefix=args.mixing,
         quality=args.quality,
         overlay_superpixels=args.overlay,
+        chunk_size=args.chunk_size,
+        low_memory=args.low_memory,
+        strict_size=args.strict_size,
     )
 
 
 if __name__ == "__main__":
     main()
-
