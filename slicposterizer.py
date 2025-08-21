@@ -146,10 +146,10 @@ class SLICPosterizer:
     @log_method(log_time=True)
     def posterize(
         self,
-        input_path: Path,
-        output_path: Path,
-        palette_path: Path | None = None,
-        mixing_prefix: Path | None = None,
+        input_path: Path | Image.Image | str | None,
+        output_path: Path | str,
+        palette_path: Path | str | None = None,
+        mixing_prefix: Path | str | None = None,
         quality: int = 95,
     ) -> None:
         """
@@ -200,9 +200,9 @@ class SLICPosterizer:
         and median filters, then quantizes the final image colors strictly to the palette.
         """
         img_rgb = self._preprocess(image)
-        segments, palette_rgb, palette_lab = self._compute_palette_and_segments(img_rgb)
+        segments, palette_rgb, palette_lab = self._copmute_segments_and_palette(img_rgb)
 
-        simple_post = self._simple_posterize(img_rgb, palette_lab, palette_rgb)
+        simple_post, img_lab = self._simple_posterize(img_rgb, palette_lab, palette_rgb)
 
         if self.preserve_edges:
             img_lab = skcolor.rgb2lab(img_rgb)
@@ -218,7 +218,7 @@ class SLICPosterizer:
         return posterized, final_weights, palette_rgb, segments
 
     # Image I/O and preprocessing
-    def load_image(self, source: Path | Image.Image | None) -> np.ndarray:
+    def load_image(self, source: Path | Image.Image | str | None) -> np.ndarray:
         """
         Reads an image from the given file source, converting it into a standard
         RGB numpy array with 8-bit color channels.
@@ -250,7 +250,7 @@ class SLICPosterizer:
         except Exception as e:
             raise ValueError(f"Failed to load image from {source_name}: {e}") from e
 
-    def save_image(self, img: np.ndarray, path: Path, quality: int = 95) -> None:
+    def save_image(self, img: np.ndarray, path: Path | str, quality: int = 95) -> None:
         """
         Converts the processed image, which uses floats between 0 and 1, back to 8-bit unsigned integers (0-255)
         and saves it to the specified path using Pillow.
@@ -316,7 +316,7 @@ class SLICPosterizer:
     @log_step(
         lambda self: f"Computing {self.num_superpixels} superpixels and {self.num_colors}-color palette..."
     )
-    def _compute_palette_and_segments(
+    def _copmute_segments_and_palette(
         self, img_rgb: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -341,7 +341,7 @@ class SLICPosterizer:
         """
         img_lab = skcolor.rgb2lab(img_rgb)
         assignments = self._assign_pixels_to_palette(img_lab, palette_lab)
-        return palette_rgb[assignments]
+        return palette_rgb[assignments], img_lab
 
     @log_step("Preserving details with superpixel reconstruction and edge weighting...")
     def _preserve_detail(
@@ -696,8 +696,8 @@ class SLICPosterizer:
 
 
 def posterize(
-    input_path: Path | Image.Image,
-    output_path: Path,
+    input_path: Path | Image.Image | str,
+    output_path: Path | str,
     *,
     num_colors: int = 52,
     blur_radius: float = 1.5,
@@ -708,8 +708,8 @@ def posterize(
     superpixel_compactness: float = 15.0,
     detail_blend_strength: float = 0.05,
     smoothing: int = 5,
-    palette_path: Path | None = None,
-    mixing_prefix: Path | None = None,
+    palette_path: Path | str | None = None,
+    mixing_prefix: Path | str | None = None,
     quality: int = 95,
     overlay_superpixels: bool = False,
 ):
@@ -806,10 +806,14 @@ def main():
     args = parser.parse_args()
 
     if not sys.stdin.isatty():
-        if not args.output and not args.input:
-            parser.error("Output path required when reading from stdin.")
-        if args.output is None:
-            output_path = args.input
+        # Reading from stdin
+        if not args.output:
+            if args.input:
+                output_path = args.input
+            else:
+                parser.error(
+                    "Output path required when reading from stdin without input path."
+                )
         else:
             output_path = args.output
         input_data = Image.open(BytesIO(sys.stdin.buffer.read()))
