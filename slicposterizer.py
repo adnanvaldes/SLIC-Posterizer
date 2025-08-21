@@ -140,6 +140,7 @@ class SLICPosterizer:
             num_colors = min(num_colors, 50)
             preserve_edges = False
             overlay_superpixels = False
+            chunk_size = 128
 
         self.num_colors = num_colors
         self.blur_radius = blur_radius
