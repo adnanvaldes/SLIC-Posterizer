@@ -34,6 +34,7 @@ This implementation also streamlines dependencies and uses only the necessary im
 - Edge preservation with threshold controls  
 - Optional overlay of superpixel boundaries  
 - Command-line usage or import as a Python module  
+- Optional `low-memory` and `chunking` parameters to optimize processing in low resource environments
 
 ---
 
@@ -115,33 +116,38 @@ usage: slicposterizer [-h] [-m MIXING] [-p PALETTE] [-c COLORS] [-S SUPERPIXELS]
 SLIC Posterizer - SLIC-Based Artistic Posterization
 
 positional arguments:
-  input                 Input image path
-  output                Output posterized image path
+  input                 Input image path (default: None)
+  output                Output posterized image path (default: None)
 
 options:
-  -h, --help            Show help message and exit
-  -m MIXING, --mixing MIXING
-                        Output prefix for additive mixing layers (default: None)
-  -p PALETTE, --palette PALETTE
-                        Output path for palette swatch (default: None)
+  -h, --help            show this help message and exit
   -c COLORS, --colors COLORS
                         Number of colors in palette (default: 64)
+  -b BLUR, --blur BLUR  Blur radius for smoothing (default: 1)
+  -s [1-10], --smoothing [1-10]
+                        Smoothing strength level (1-10) (default: 3)
   -S SUPERPIXELS, --superpixels SUPERPIXELS
                         Number of superpixels (default: 4500)
   --compactness COMPACTNESS
                         SLIC superpixel compactness parameter (default: 15.0)
-  -b BLUR, --blur BLUR  Blur radius for smoothing (default: 1)
+  --overlay             Overlay superpixel boundaries on the final image (default: False)
+  -m MIXING, --mixing MIXING
+                        Output prefix for additive mixing layers (default: None)
+  -p PALETTE, --palette PALETTE
+                        Output path for palette swatch (default: None)
   -e EDGE_THRESHOLD, --edge-threshold EDGE_THRESHOLD
                         Edge detection threshold (default: 0.1)
   -d DOWNSAMPLE, --downsample DOWNSAMPLE
                         Downsample factor (>=1) (default: 1)
-  --no-edge-preserve    Disable edge preservation (default: False)
   --detail-blend DETAIL_BLEND
                         Blend factor for detail preservation (default: 0.1)
   --quality QUALITY     JPEG quality (if saving JPEG) (default: 95)
-  -s [1-10], --smoothing [1-10]
-                        Smoothing strength level (1-10) (default: 3)
-  --overlay             Overlay superpixel boundaries (default: False)
+  --no-edge-preserve    Disable edge preservation (default: False)
+  --strict-size MAX_DIM
+                        Resize longest image dimension to this value, keeping aspect ratio (e.g. 1920) (default: None)
+  --chunk-size CHUNK_SIZE
+                        Process image in chunks of this size for memory efficiency (enables chunked mode) (default: None)
+  --low-memory          Enable low memory mode (reduces superpixels and colors) (default: False)
 ```
 
 ---
