@@ -172,7 +172,7 @@ class SLICPosterizer:
 
         It also optionally saves a color palette swatch and additive color layers for further use.
         """
-        image = self.load_image(input_path)
+        image, metadata, exif = self.load_image(input_path)
 
         if strict_size:
             h, w = image.shape[:2]
@@ -212,7 +212,7 @@ class SLICPosterizer:
                 posterized, upsampled_segments
             )
 
-        self.save_image(posterized, output_path, quality)
+        self.save_image(posterized, output_path, quality, metadata=metadata, exif=exif)
 
         if palette_path:
             swatch = self._create_palette_swatch(palette)
@@ -326,11 +326,20 @@ class SLICPosterizer:
 
         try:
             with Image.open(source) as img:
-                return np.array(img.convert("RGB"))
+                metadata = img.info.copy()
+                exif = img.getexif() if hasattr(img, "getexif") else None
+                return np.array(img.convert("RGB")), metadata, exif
         except Exception as e:
             raise ValueError(f"Failed to load image from {source_name}: {e}") from e
 
-    def save_image(self, img: np.ndarray, path: Path | str, quality: int = 95) -> None:
+    def save_image(
+        self,
+        img: np.ndarray,
+        path: Path | str,
+        quality: int = 95,
+        metadata: dict | None = None,
+        exif: Image.Exif | None = None,
+    ) -> None:
         """
         Converts the processed image, which uses floats between 0 and 1, back to 8-bit unsigned integers (0-255)
         and saves it to the specified path using Pillow.
@@ -340,7 +349,22 @@ class SLICPosterizer:
             path = Path(path)
 
         img_u8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
-        Image.fromarray(img_u8).save(path, quality=quality)
+        pil_img = Image.fromarray(img_u8)
+        new_w, new_h = pil_img.size
+
+        supports_exif = path.suffix.lower() in [".jpg", ".jpeg", ".tiff", ".tif"]
+        save_kwargs = {"quality": quality}
+
+        if metadata:
+            metadata = {k: v for k, v in metadata.items() if k != "icc_profile"}
+            save_kwargs.update(metadata)
+
+        if exif and supports_exif:
+            exif[0xA002] = new_w  # Exif hex code for width
+            exif[0xA003] = new_h  # Exif hex code for height
+            save_kwargs["exif"] = exif
+
+        pil_img.save(path, **save_kwargs)
         logger.info(f"Saved image: {path}")
 
     def downsample_image(self, img: np.ndarray) -> np.ndarray:
