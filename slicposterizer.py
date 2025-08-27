@@ -224,7 +224,6 @@ class SLICPosterizer:
         input_path: Path | Image.Image | str | None,
         output_path: Path | str,
         palette_path: Path | str | None = None,
-        mixing_prefix: Path | str | None = None,
         quality: int = 95,
         strict_size: int | None = None,
     ) -> None:
@@ -290,9 +289,9 @@ class SLICPosterizer:
         image = self.downsample_image(image)
 
         if self.chunk_size:
-            posterized, weights, palette, segments = self.process_chunked(image)
+            posterized, palette, segments = self.process_chunked(image)
         else:
-            posterized, weights, palette, segments = self.process(image)
+            posterized, palette, segments = self.process(image)
 
         posterized = self.upsample_image(posterized, original_shape)
 
@@ -313,13 +312,6 @@ class SLICPosterizer:
             )
 
         self.save_image(posterized, output_path, quality, metadata=metadata, exif=exif)
-
-        if palette_path:
-            swatch = self._create_palette_swatch(palette)
-            self.save_image(swatch, palette_path)
-
-        if mixing_prefix:
-            self._save_additive_layers(weights, palette, mixing_prefix)
 
     @log_method(log_time=True)
     def process(
@@ -351,9 +343,9 @@ class SLICPosterizer:
         del simple_post
         check_memory_and_gc()
 
-        posterized, weights = self._final_quantize(posterized, palette_lab, palette_rgb)
+        posterized = self._final_quantize(posterized, palette_lab, palette_rgb)
 
-        return posterized, weights, palette_rgb, segments
+        return posterized, palette_rgb, segments
 
     @log_method(log_time=True)
     def process_chunked(
@@ -406,15 +398,18 @@ class SLICPosterizer:
                 chunk_smooth = self._smooth(chunk_simple_post)
                 del chunk_simple_post
 
-                chunk_quantized, chunk_weights = self._final_quantize(
+                chunk_quantized = self._final_quantize(
                     chunk_smooth, palette_lab, palette_rgb
                 )
                 del chunk_smooth
 
                 posterized[i:end_i, j:end_j] = chunk_quantized
-                weights[i:end_i, j:end_j] = chunk_weights
 
-                del chunk, chunk_segments, chunk_quantized, chunk_weights
+                del (
+                    chunk,
+                    chunk_segments,
+                    chunk_quantized,
+                )
                 processed_chunks += 1
 
                 if processed_chunks % max(1, total_chunks // 10) == 0:
@@ -641,10 +636,7 @@ class SLICPosterizer:
         """
         lab = skcolor.rgb2lab(img)
         assignments = self._assign_pixels_to_palette(lab, palette_lab)
-        posterized = palette_rgb[assignments]
-
-        weights = np.eye(len(palette_rgb), dtype=np.float32)[assignments]
-        return posterized, weights
+        return palette_rgb[assignments]
 
     @log_step("Overlaying superpixel boundaries...")
     def _overlay_superpixel_boundaries(
@@ -916,45 +908,6 @@ class SLICPosterizer:
             swatch[:, i * height : (i + 1) * height, :] = color[None, None, :]
         return swatch
 
-    def _save_additive_layers(
-        self,
-        mixing_weights: np.ndarray,
-        palette_rgb: np.ndarray,
-        prefix: Path | str,
-    ) -> None:
-        """
-        Saves one image per palette color showing that color's contribution and a mask.
-        """
-        if not isinstance(prefix, Path):
-            prefix = Path(prefix)
-
-        n_colors = palette_rgb.shape[0]
-        for i in range(n_colors):
-            alpha = mixing_weights[:, :, i]
-
-            if alpha.size > 10_000_000:  # 10M pixels
-                logger.info(f"Processing large weight array for color {i} in chunks...")
-
-            layer = np.zeros((*alpha.shape, 4), dtype=np.float32)
-            layer[..., :3] = palette_rgb[i]
-            layer[..., 3] = alpha
-            rgba_img = (np.clip(layer, 0, 1) * 255).astype(np.uint8)
-
-            file_path = prefix.with_name(f"{prefix.stem}-{i}.png")
-            Image.fromarray(rgba_img, mode="RGBA").save(file_path)
-
-            mask = (alpha > 1e-6).astype(np.uint8) * 255
-            mask_rgb = np.stack([mask] * 3, axis=2)
-            mask_path = prefix.with_name(f"{prefix.stem}-{i}-mask.png")
-            Image.fromarray(mask_rgb, mode="RGB").save(mask_path)
-
-            del layer, rgba_img, mask, mask_rgb
-
-            if i % 5 == 0:  # GC every 5 layers
-                check_memory_and_gc()
-
-        logger.info(f"Additive mixing layers saved with prefix '{prefix}'")
-
 
 def posterize(
     input_path: Path | Image.Image | str,
@@ -970,7 +923,6 @@ def posterize(
     detail_blend_strength: float = 0.05,
     smoothing: int = 5,
     palette_path: Path | str | None = None,
-    mixing_prefix: Path | str | None = None,
     quality: int = 95,
     overlay_superpixels: bool = False,
     chunk_size: int | None = None,
@@ -999,7 +951,6 @@ def posterize(
         input_path,
         output_path,
         palette_path=palette_path,
-        mixing_prefix=mixing_prefix,
         quality=quality,
         strict_size=strict_size,
     )
@@ -1042,9 +993,6 @@ def main():
         "--overlay",
         action="store_true",
         help="Overlay superpixel boundaries on the final image",
-    )
-    parser.add_argument(
-        "-m", "--mixing", help="Output prefix for additive mixing layers"
     )
     parser.add_argument("-p", "--palette", help="Output path for palette swatch")
     parser.add_argument(
@@ -1129,7 +1077,6 @@ def main():
             detail_blend_strength=args.detail_blend,
             smoothing=args.smoothing,
             palette_path=args.palette,
-            mixing_prefix=args.mixing,
             quality=args.quality,
             overlay_superpixels=args.overlay,
             chunk_size=args.chunk_size,
