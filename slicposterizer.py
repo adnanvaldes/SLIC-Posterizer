@@ -23,6 +23,8 @@ import functools
 import logging
 import sys
 import time
+import gc
+import psutil
 
 from io import BytesIO
 from pathlib import Path
@@ -42,6 +44,10 @@ CANNY_HIGH_THRESHOLD_BASE = 150
 CANNY_THRESHOLD_MARGIN = 10
 EDGE_DETECTION_SCALE = 1
 
+# Memory management constants
+MAX_IMAGE_PIXELS = 50_000_000  # Automatically downsample images larger than this
+MEMORY_WARNING_THRESHOLD = 0.8  # Warn when using 80% of available memory
+MEMORY_CRITICAL_THRESHOLD = 0.9  # Force garbage collection at 90%
 
 # Min segment amount to cover image pixels, in percentage
 COVERAGE_THRESHOLD = 0.95
@@ -65,6 +71,50 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+def get_memory_usage():
+    """Get current memory usage as a fraction of total available memory."""
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    system_mem = psutil.virtual_memory()
+    return mem_info.rss / system_mem.total
+
+
+def check_memory_and_gc(force=False):
+    """Check memory usage and force garbage collection if needed."""
+    usage = get_memory_usage()
+    if usage > MEMORY_CRITICAL_THRESHOLD or force:
+        logger.info(
+            f"High memory usage detected ({usage:.1%}), forcing garbage collection..."
+        )
+        gc.collect()
+        new_usage = get_memory_usage()
+        logger.info(f"Memory usage after GC: {new_usage:.1%}")
+        return new_usage
+    elif usage > MEMORY_WARNING_THRESHOLD:
+        logger.warning(f"High memory usage: {usage:.1%}")
+    return usage
+
+
+def estimate_processing_memory(image_shape, num_colors, num_superpixels):
+    """Estimate memory requirements for processing."""
+    h, w, c = image_shape
+    pixels = h * w
+    base_memory = pixels * c * 4 * 6  # 6 copies, float32
+    segments_memory = pixels * 4  # int32
+    distance_memory = pixels * num_colors * 4  # float32
+    weights_memory = pixels * num_colors * 4  # float32
+    superpixel_memory = num_superpixels * num_colors * 4 * 2
+
+    total_bytes = (
+        base_memory
+        + segments_memory
+        + distance_memory
+        + weights_memory
+        + superpixel_memory
+    )
+    return total_bytes
+
+
 def log_method(log_time: bool = False):
     """
     Decorator to log start and end of a method call.
@@ -76,12 +126,24 @@ def log_method(log_time: bool = False):
         def wrapper(self, *args, **kwargs):
             logger.info(f"Starting '{func.__name__}'...")
             start = time.time() if log_time else None
+            start_memory = get_memory_usage()
+
             result = func(self, *args, **kwargs)
+
+            end_memory = check_memory_and_gc()
+            memory_delta = end_memory - start_memory
+
             if log_time:
                 duration = time.time() - start
-                logger.info(f"Finished '{func.__name__}' in {duration:.2f} seconds.")
+                logger.info(
+                    f"Finished '{func.__name__}' in {duration:.2f} seconds. "
+                    f"Memory: {end_memory:.1%} (Δ{memory_delta:+.1%})"
+                )
             else:
-                logger.info(f"Finished '{func.__name__}'.")
+                logger.info(
+                    f"Finished '{func.__name__}'. "
+                    f"Memory: {end_memory:.1%} (Δ{memory_delta:+.1%})"
+                )
             return result
 
         return wrapper
@@ -102,6 +164,7 @@ def log_step(msg_or_func):
             logger.info(f"Starting: {msg}")
             result = func(self, *args, **kwargs)
             logger.info(f"Finished: {msg}")
+            check_memory_and_gc()
             return result
 
         return wrapper
@@ -174,6 +237,43 @@ class SLICPosterizer:
         """
         image, metadata, exif = self.load_image(input_path)
 
+        h, w = image.shape[:2]
+        total_pixels = h * w
+
+        if total_pixels > MAX_IMAGE_PIXELS:
+            scale_factor = (MAX_IMAGE_PIXELS / total_pixels) ** 0.5
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            logger.warning(
+                f"Image too large ({total_pixels:,} pixels), auto-downsampling to {new_w}x{new_h}"
+            )
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        estimated_memory = estimate_processing_memory(
+            image.shape, self.num_colors, self.num_superpixels
+        )
+        available_memory = psutil.virtual_memory().available
+
+        if estimated_memory > available_memory * 0.7:
+            logger.warning(
+                f"Estimated memory usage ({estimated_memory / 1e9:.1f} GB) exceeds available memory"
+            )
+            if not self.chunk_size:
+                chunk_size = max(
+                    32,
+                    min(
+                        256,
+                        int(
+                            (available_memory * 0.3 / estimated_memory)
+                            * min(image.shape[:2])
+                        ),
+                    ),
+                )
+                logger.info(
+                    f"Auto-enabling chunked processing with chunk size {chunk_size}"
+                )
+                self.chunk_size = chunk_size
+
         if strict_size:
             h, w = image.shape[:2]
             if w >= h:
@@ -233,6 +333,9 @@ class SLICPosterizer:
         and median filters, then quantizes the final image colors strictly to the palette.
         """
         img_rgb = self._preprocess(image)
+        del image
+        check_memory_and_gc()
+
         segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
 
         simple_post, img_lab = self._simple_posterize(img_rgb, palette_lab, palette_rgb)
@@ -241,8 +344,13 @@ class SLICPosterizer:
             simple_post = self._preserve_detail(
                 img_rgb, img_lab, segments, palette_lab, palette_rgb, simple_post
             )
+            del img_lab
+            check_memory_and_gc()
 
         posterized = self._smooth(simple_post)
+        del simple_post
+        check_memory_and_gc()
+
         posterized, weights = self._final_quantize(posterized, palette_lab, palette_rgb)
 
         return posterized, weights, palette_rgb, segments
@@ -258,11 +366,19 @@ class SLICPosterizer:
         the image the segments and palette are processed prior to chunking.
         """
         img_rgb = self._preprocess(image)
+        del image
+        check_memory_and_gc()
+
         h, w = img_rgb.shape[:2]
         segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
 
-        posterized = np.zeros_like(img_rgb)
+        posterized = np.zeros_like(img_rgb, dtype=np.float32)
         weights = np.zeros((h, w, len(palette_rgb)), dtype=np.float32)
+
+        chunks_h = (h + self.chunk_size - 1) // self.chunk_size
+        chunks_w = (w + self.chunk_size - 1) // self.chunk_size
+        total_chunks = chunks_h * chunks_w
+        processed_chunks = 0
 
         for i in range(0, h, self.chunk_size):
             for j in range(0, w, self.chunk_size):
@@ -285,15 +401,26 @@ class SLICPosterizer:
                         palette_rgb,
                         chunk_simple_post,
                     )
+                    del chunk_lab
 
                 chunk_smooth = self._smooth(chunk_simple_post)
+                del chunk_simple_post
 
                 chunk_quantized, chunk_weights = self._final_quantize(
                     chunk_smooth, palette_lab, palette_rgb
                 )
+                del chunk_smooth
 
                 posterized[i:end_i, j:end_j] = chunk_quantized
                 weights[i:end_i, j:end_j] = chunk_weights
+
+                del chunk, chunk_segments, chunk_quantized, chunk_weights
+                processed_chunks += 1
+
+                if processed_chunks % max(1, total_chunks // 10) == 0:
+                    progress = processed_chunks / total_chunks
+                    logger.info(f"Chunk processing: {progress:.1%} complete")
+                    check_memory_and_gc()
 
         return posterized, weights, palette_rgb, segments
 
@@ -309,7 +436,7 @@ class SLICPosterizer:
         """
 
         if isinstance(source, Image.Image):
-            return np.array(source.convert("RGB"))
+            return np.array(source.convert("RGB")), {}, None
 
         if isinstance(source, str):
             source = Path(source)
@@ -441,7 +568,7 @@ class SLICPosterizer:
     @log_step("Performing simple posterization...")
     def _simple_posterize(
         self, img_rgb: np.ndarray, palette_lab: np.ndarray, palette_rgb: np.ndarray
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Converts the image to Lab color space, then assigns each pixel to the closest palette color by Euclidean distance in Lab space.
         This step generates a simple, flat color version of the image without any edge or detail preservation.
@@ -468,12 +595,16 @@ class SLICPosterizer:
         seg_means_lab, _ = self._compute_segment_means(img_lab, segments)
         seg_weights = self._compute_segment_weights(seg_means_lab, palette_lab)
         pixel_weights = self._expand_weights_to_pixels(seg_weights, segments)
+        del seg_means_lab, seg_weights
         weighted_post = self._reconstruct_from_weights(pixel_weights, palette_rgb)
+        del pixel_weights
 
         edges = self._detect_edges((img_rgb * 255).astype(np.uint8))
         edge_weight = self.detail_blend_strength * edges[..., None]
+        del edges
 
         blended = simple_post * (1 - edge_weight) + weighted_post * edge_weight
+        del weighted_post, edge_weight
         return np.clip(blended, 0, 1)
 
     @log_step("Applying smoothing filters...")
@@ -651,12 +782,26 @@ class SLICPosterizer:
         """
         Computes the Euclidean distance in Lab space between every pixel and each palette color,
         then picks the closest palette color for every pixel. Produces a 2D assignment map.
+
+        Runs the process in chunks to reduce memory consumption.
         """
         h, w = img_lab.shape[:2]
         pixels = img_lab.reshape(-1, 3)
+        assignments = np.zeros(len(pixels), dtype=np.int32)
 
-        distances = np.linalg.norm(pixels[:, None, :] - palette_lab[None, :, :], axis=2)
-        assignments = np.argmin(distances, axis=1)
+        # Process in batches to avoid memory explosion
+        batch_size = min(100_000, len(pixels))  # Adjust based on available memory
+
+        for i in range(0, len(pixels), batch_size):
+            end_idx = min(i + batch_size, len(pixels))
+            batch_pixels = pixels[i:end_idx]
+
+            # Compute distances for this batch only
+            distances = np.linalg.norm(
+                batch_pixels[:, None, :] - palette_lab[None, :, :], axis=2
+            )
+            assignments[i:end_idx] = np.argmin(distances, axis=1)
+
         return assignments.reshape(h, w)
 
     # Weight computations and reconstruction
@@ -786,6 +931,10 @@ class SLICPosterizer:
         n_colors = palette_rgb.shape[0]
         for i in range(n_colors):
             alpha = mixing_weights[:, :, i]
+
+            if alpha.size > 10_000_000:  # 10M pixels
+                logger.info(f"Processing large weight array for color {i} in chunks...")
+
             layer = np.zeros((*alpha.shape, 4), dtype=np.float32)
             layer[..., :3] = palette_rgb[i]
             layer[..., 3] = alpha
@@ -798,6 +947,11 @@ class SLICPosterizer:
             mask_rgb = np.stack([mask] * 3, axis=2)
             mask_path = prefix.with_name(f"{prefix.stem}-{i}-mask.png")
             Image.fromarray(mask_rgb, mode="RGB").save(mask_path)
+
+            del layer, rgba_img, mask, mask_rgb
+
+            if i % 5 == 0:  # GC every 5 layers
+                check_memory_and_gc()
 
         logger.info(f"Additive mixing layers saved with prefix '{prefix}'")
 
@@ -956,26 +1110,40 @@ def main():
         input_data = args.input
         output_path = args.output
 
-    posterize(
-        input_path=input_data,
-        output_path=output_path,
-        num_colors=args.colors,
-        blur_radius=args.blur,
-        edge_threshold=args.edge_threshold,
-        downsample_factor=args.downsample,
-        preserve_edges=not args.no_edge_preserve,
-        num_superpixels=args.superpixels,
-        superpixel_compactness=args.compactness,
-        detail_blend_strength=args.detail_blend,
-        smoothing=args.smoothing,
-        palette_path=args.palette,
-        mixing_prefix=args.mixing,
-        quality=args.quality,
-        overlay_superpixels=args.overlay,
-        chunk_size=args.chunk_size,
-        low_memory=args.low_memory,
-        strict_size=args.strict_size,
+    system_mem = psutil.virtual_memory()
+    logger.info(
+        f"System memory: {system_mem.total / 1e9:.1f} GB total, {system_mem.available / 1e9:.1f} GB available"
     )
+
+    try:
+        posterize(
+            input_path=input_data,
+            output_path=output_path,
+            num_colors=args.colors,
+            blur_radius=args.blur,
+            edge_threshold=args.edge_threshold,
+            downsample_factor=args.downsample,
+            preserve_edges=not args.no_edge_preserve,
+            num_superpixels=args.superpixels,
+            superpixel_compactness=args.compactness,
+            detail_blend_strength=args.detail_blend,
+            smoothing=args.smoothing,
+            palette_path=args.palette,
+            mixing_prefix=args.mixing,
+            quality=args.quality,
+            overlay_superpixels=args.overlay,
+            chunk_size=args.chunk_size,
+            low_memory=args.low_memory,
+            strict_size=args.strict_size,
+        )
+    except MemoryError:
+        logger.error(
+            "Out of memory! Try using --low-memory flag or --chunk-size for large images."
+        )
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
