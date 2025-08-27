@@ -233,7 +233,7 @@ class SLICPosterizer:
         and median filters, then quantizes the final image colors strictly to the palette.
         """
         img_rgb = self._preprocess(image)
-        segments, palette_rgb, palette_lab = self._copmute_segments_and_palette(img_rgb)
+        segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
 
         simple_post, img_lab = self._simple_posterize(img_rgb, palette_lab, palette_rgb)
 
@@ -259,7 +259,7 @@ class SLICPosterizer:
         """
         img_rgb = self._preprocess(image)
         h, w = img_rgb.shape[:2]
-        segments, palette_rgb, palette_lab = self._copmute_segments_and_palette(img_rgb)
+        segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
 
         posterized = np.zeros_like(img_rgb)
         weights = np.zeros((h, w, len(palette_rgb)), dtype=np.float32)
@@ -423,7 +423,7 @@ class SLICPosterizer:
     @log_step(
         lambda self: f"Computing {self.num_superpixels} superpixels and {self.num_colors}-color palette..."
     )
-    def _copmute_segments_and_palette(
+    def _compute_segments_and_palette(
         self, img_rgb: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
