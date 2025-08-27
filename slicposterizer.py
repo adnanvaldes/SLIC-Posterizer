@@ -24,7 +24,6 @@ import logging
 import sys
 import time
 import gc
-import psutil
 
 from io import BytesIO
 from pathlib import Path
@@ -71,50 +70,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def get_memory_usage():
-    """Get current memory usage as a fraction of total available memory."""
-    process = psutil.Process()
-    mem_info = process.memory_info()
-    system_mem = psutil.virtual_memory()
-    return mem_info.rss / system_mem.total
-
-
-def check_memory_and_gc(force=False):
-    """Check memory usage and force garbage collection if needed."""
-    usage = get_memory_usage()
-    if usage > MEMORY_CRITICAL_THRESHOLD or force:
-        logger.info(
-            f"High memory usage detected ({usage:.1%}), forcing garbage collection..."
-        )
-        gc.collect()
-        new_usage = get_memory_usage()
-        logger.info(f"Memory usage after GC: {new_usage:.1%}")
-        return new_usage
-    elif usage > MEMORY_WARNING_THRESHOLD:
-        logger.warning(f"High memory usage: {usage:.1%}")
-    return usage
-
-
-def estimate_processing_memory(image_shape, num_colors, num_superpixels):
-    """Estimate memory requirements for processing."""
-    h, w, c = image_shape
-    pixels = h * w
-    base_memory = pixels * c * 4 * 6  # 6 copies, float32
-    segments_memory = pixels * 4  # int32
-    distance_memory = pixels * num_colors * 4  # float32
-    weights_memory = pixels * num_colors * 4  # float32
-    superpixel_memory = num_superpixels * num_colors * 4 * 2
-
-    total_bytes = (
-        base_memory
-        + segments_memory
-        + distance_memory
-        + weights_memory
-        + superpixel_memory
-    )
-    return total_bytes
-
-
 def log_method(log_time: bool = False):
     """
     Decorator to log start and end of a method call.
@@ -126,24 +81,16 @@ def log_method(log_time: bool = False):
         def wrapper(self, *args, **kwargs):
             logger.info(f"Starting '{func.__name__}'...")
             start = time.time() if log_time else None
-            start_memory = get_memory_usage()
 
             result = func(self, *args, **kwargs)
 
-            end_memory = check_memory_and_gc()
-            memory_delta = end_memory - start_memory
+            gc.collect()
 
             if log_time:
                 duration = time.time() - start
-                logger.info(
-                    f"Finished '{func.__name__}' in {duration:.2f} seconds. "
-                    f"Memory: {end_memory:.1%} (Δ{memory_delta:+.1%})"
-                )
+                logger.info(f"Finished '{func.__name__}' in {duration:.2f} seconds.")
             else:
-                logger.info(
-                    f"Finished '{func.__name__}'. "
-                    f"Memory: {end_memory:.1%} (Δ{memory_delta:+.1%})"
-                )
+                logger.info(f"Finished '{func.__name__}'.")
             return result
 
         return wrapper
@@ -164,7 +111,7 @@ def log_step(msg_or_func):
             logger.info(f"Starting: {msg}")
             result = func(self, *args, **kwargs)
             logger.info(f"Finished: {msg}")
-            check_memory_and_gc()
+            gc.collect()
             return result
 
         return wrapper
@@ -248,31 +195,6 @@ class SLICPosterizer:
             )
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        estimated_memory = estimate_processing_memory(
-            image.shape, self.num_colors, self.num_superpixels
-        )
-        available_memory = psutil.virtual_memory().available
-
-        if estimated_memory > available_memory * 0.7:
-            logger.warning(
-                f"Estimated memory usage ({estimated_memory / 1e9:.1f} GB) exceeds available memory"
-            )
-            if not self.chunk_size:
-                chunk_size = max(
-                    32,
-                    min(
-                        256,
-                        int(
-                            (available_memory * 0.3 / estimated_memory)
-                            * min(image.shape[:2])
-                        ),
-                    ),
-                )
-                logger.info(
-                    f"Auto-enabling chunked processing with chunk size {chunk_size}"
-                )
-                self.chunk_size = chunk_size
-
         if strict_size:
             h, w = image.shape[:2]
             if w >= h:
@@ -326,7 +248,7 @@ class SLICPosterizer:
         """
         img_rgb = self._preprocess(image)
         del image
-        check_memory_and_gc()
+        gc.collect()
 
         segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
 
@@ -337,11 +259,11 @@ class SLICPosterizer:
                 img_rgb, img_lab, segments, palette_lab, palette_rgb, simple_post
             )
             del img_lab
-            check_memory_and_gc()
+            gc.collect()
 
         posterized = self._smooth(simple_post)
         del simple_post
-        check_memory_and_gc()
+        gc.collect()
 
         posterized = self._final_quantize(posterized, palette_lab, palette_rgb)
 
@@ -359,7 +281,7 @@ class SLICPosterizer:
         """
         img_rgb = self._preprocess(image)
         del image
-        check_memory_and_gc()
+        gc.collect()
 
         h, w = img_rgb.shape[:2]
         segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
@@ -415,7 +337,7 @@ class SLICPosterizer:
                 if processed_chunks % max(1, total_chunks // 10) == 0:
                     progress = processed_chunks / total_chunks
                     logger.info(f"Chunk processing: {progress:.1%} complete")
-                    check_memory_and_gc()
+                    gc.collect()
 
         return posterized, weights, palette_rgb, segments
 
@@ -884,12 +806,11 @@ class SLICPosterizer:
         )
 
         edges_small = cv2.Canny(blurred, low, high) / 255.0
-        edges = cv2.resize(
+        return cv2.resize(
             edges_small,
             (img_rgb_u8.shape[1], img_rgb_u8.shape[0]),
             interpolation=cv2.INTER_LINEAR,
         )
-        return edges
 
     # Output and visualization
 
@@ -1057,11 +978,6 @@ def main():
             )
         input_data = args.input
         output_path = args.output
-
-    system_mem = psutil.virtual_memory()
-    logger.info(
-        f"System memory: {system_mem.total / 1e9:.1f} GB total, {system_mem.available / 1e9:.1f} GB available"
-    )
 
     try:
         posterize(
