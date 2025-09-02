@@ -511,11 +511,9 @@ class SLICPosterizer:
         """
         seg_means_lab, _ = self._compute_segment_means(img_lab, segments)
         seg_weights = self._compute_segment_weights(seg_means_lab, palette_lab)
-        pixel_weights = self._expand_weights_to_pixels(seg_weights, segments)
-        del seg_means_lab, seg_weights
-        weighted_post = self._reconstruct_from_weights(pixel_weights, palette_rgb)
-        del pixel_weights
-
+        del seg_means_lab
+        weighted_post = self._compute_weighted_image(segments, seg_weights, palette_rgb)
+        del seg_weights
         edges = self._detect_edges((img_rgb * 255).astype(np.uint8))
         edge_weight = self.detail_blend_strength * edges[..., None]
         del edges
@@ -753,22 +751,6 @@ class SLICPosterizer:
             weights[i] = w
         return weights
 
-    def _expand_weights_to_pixels(
-        self,
-        segment_weights: np.ndarray,
-        segments: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Maps segment-level color mixing weights down to individual pixels by using the segment labels,
-        so each pixel inherits its segment's color mix weights.
-        """
-        h, w = segments.shape
-        k = segment_weights.shape[1]
-
-        flat_segments = segments.flatten()
-        per_pixel_weights = segment_weights[flat_segments]
-        return per_pixel_weights.reshape(h, w, k)
-
     def _reconstruct_from_weights(
         self,
         weights_per_pixel: np.ndarray,
@@ -780,6 +762,17 @@ class SLICPosterizer:
         """
         reconstructed = weights_per_pixel @ palette_rgb
         return np.clip(reconstructed, 0, 1)
+
+    def _compute_weighted_image(self, segments, segment_weights, palette_rgb):
+        """
+        Compute weighted posterized image without expanding weights to per-pixel array.
+        """
+        h, w = segments.shape
+        output = np.empty((h * w, 3), dtype=np.float32)
+        flat_segments = segments.ravel()
+        colors = segment_weights @ palette_rgb  # (num_segments, 3)
+        output[:] = colors[flat_segments]
+        return output.reshape((h, w, 3))
 
     def _detect_edges(
         self,
