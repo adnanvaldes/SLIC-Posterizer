@@ -34,7 +34,6 @@ This implementation also streamlines dependencies and uses only the necessary im
 - Edge preservation with threshold controls  
 - Optional overlay of superpixel boundaries  
 - Command-line usage or import as a Python module  
-- Optional `low-memory` and `chunking` parameters to optimize processing in low resource environments
 
 ---
 
@@ -145,9 +144,6 @@ options:
   --no-edge-preserve    Disable edge preservation (default: False)
   --strict-size MAX_DIM
                         Resize longest image dimension to this value, keeping aspect ratio (e.g. 1920) (default: None)
-  --chunk-size CHUNK_SIZE
-                        Process image in chunks of this size for memory efficiency (enables chunked mode) (default: None)
-  --low-memory          Enable low memory mode (reduces superpixels and colors) (default: False)
 ```
 
 ---
