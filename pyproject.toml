@@ -34,3 +34,8 @@ members = [
 
 [tool.setuptools]
 py-modules = ["slicposterizer"]
+
+[dependency-groups]
+dev = [
+    "scalene>=1.5.54",
+]
