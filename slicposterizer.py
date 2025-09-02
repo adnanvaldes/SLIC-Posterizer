@@ -45,8 +45,6 @@ EDGE_DETECTION_SCALE = 1
 
 # Memory management constants
 MAX_IMAGE_PIXELS = 50_000_000  # Automatically downsample images larger than this
-MEMORY_WARNING_THRESHOLD = 0.8  # Warn when using 80% of available memory
-MEMORY_CRITICAL_THRESHOLD = 0.9  # Force garbage collection at 90%
 
 # Min segment amount to cover image pixels, in percentage
 COVERAGE_THRESHOLD = 0.95
@@ -218,7 +216,6 @@ class SLICPosterizer:
         posterized = self.upsample_image(posterized, original_shape)
 
         if self.overlay_superpixels:
-            # Upsample segments if needed
             if self.downsample_factor > 1:
                 original_h, original_w = original_shape[:2]
                 upsampled_segments = cv2.resize(
@@ -452,12 +449,9 @@ class SLICPosterizer:
             ksize = int(
                 BLUR_KERNEL_MULTIPLIER * round(self.blur_radius) + BLUR_KERNEL_OFFSET
             )
-            # Ensure kernel size is odd and >= 3
             if ksize % 2 == 0:
                 ksize += 1
             ksize = max(3, ksize)
-
-            # GaussianBlur accepts float32 input, no need to convert back and forth
             img_float = cv2.GaussianBlur(
                 img_float, (ksize, ksize), sigmaX=self.blur_radius
             )
@@ -569,18 +563,10 @@ class SLICPosterizer:
         Overlays superpixel boundaries on the posterized image by detecting edges in the segment labels
         and drawing them as thin lines.
         """
-        # Create overlay image - make a copy to avoid modifying the original
         overlay = img.copy()
-
-        # Method 1: Use gradient-based boundary detection
-        # Compute gradients to find boundaries between different segments
         grad_x = np.abs(np.diff(segments, axis=1))
         grad_y = np.abs(np.diff(segments, axis=0))
-
-        # Create boundary mask
         boundaries = np.zeros_like(segments, dtype=bool)
-
-        # Mark boundaries where gradients are non-zero
         boundaries[:, 1:] |= grad_x > 0
         boundaries[:, :-1] |= grad_x > 0
         boundaries[1:, :] |= grad_y > 0
@@ -589,10 +575,8 @@ class SLICPosterizer:
         logger.info(
             f"Detected {np.sum(boundaries)} boundary pixels from {len(np.unique(segments))} segments"
         )
-
-        # Apply boundary color where boundaries exist
         if np.sum(boundaries) > 0:
-            for c in range(3):  # Apply to each color channel
+            for c in range(3):
                 overlay[boundaries, c] = boundary_color[c]
             logger.info(f"Applied overlay to {np.sum(boundaries)} boundary pixels")
         else:
@@ -600,7 +584,6 @@ class SLICPosterizer:
 
         return overlay
 
-    # Superpixels and segmentation helpers
     def _compute_superpixels(self, img: np.ndarray) -> np.ndarray:
         """
         Uses the skimage implementation of SLIC (Simple Linear Iterative Clustering) to divide the image into
@@ -650,15 +633,11 @@ class SLICPosterizer:
         """
         lab_img = skcolor.rgb2lab(img)
         seg_means_lab, counts = self._compute_segment_means(lab_img, segments)
-
         total_pixels = img.shape[0] * img.shape[1]
-
-        # Sort segments by descending pixel count
         sorted_idxs = np.argsort(counts)[::-1]
         sorted_counts = counts[sorted_idxs]
         cumulative_coverage = np.cumsum(sorted_counts) / total_pixels
 
-        # Find minimal number of segments covering threshold or at least num_colors
         num_to_keep = np.searchsorted(cumulative_coverage, COVERAGE_THRESHOLD) + 1
         num_to_keep = max(num_to_keep, self.num_colors)
 
@@ -678,7 +657,6 @@ class SLICPosterizer:
         filtered_means = seg_means_lab[valid]
         filtered_counts = counts[valid]
 
-        # If still have more segments than desired colors, pick top num_colors by pixel count
         if len(filtered_means) > self.num_colors:
             top_idxs = np.argsort(filtered_counts)[-self.num_colors :]
             filtered_means = filtered_means[top_idxs]
@@ -699,24 +677,30 @@ class SLICPosterizer:
         """
         h, w = img_lab.shape[:2]
         pixels = img_lab.reshape(-1, 3)
-        assignments = np.zeros(len(pixels), dtype=np.int32)
+        assignments = np.empty(pixels.shape[0], dtype=np.int32)
 
-        # Process in batches to avoid memory explosion
-        batch_size = min(100_000, len(pixels))  # Adjust based on available memory
+        num_colors = palette_lab.shape[0]
+        batch_size = min(100_000, len(pixels))
 
-        for i in range(0, len(pixels), batch_size):
-            end_idx = min(i + batch_size, len(pixels))
+        for i in range(0, pixels.shape[0], batch_size):
+            end_idx = min(i + batch_size, pixels.shape[0])
             batch_pixels = pixels[i:end_idx]
+            min_dist = np.full(batch_pixels.shape[0], np.inf, dtype=np.float32)
+            min_idx = np.zeros(batch_pixels.shape[0], dtype=np.int32)
 
-            # Compute distances for this batch only
-            distances = np.linalg.norm(
-                batch_pixels[:, None, :] - palette_lab[None, :, :], axis=2
-            )
-            assignments[i:end_idx] = np.argmin(distances, axis=1)
+            for c in range(num_colors):
+                diff = batch_pixels - palette_lab[c]
+                # Squared Euclidean distance of each pixel to the current palette color
+                dist = np.einsum("ij,ij->i", diff, diff)
+                mask = dist < min_dist
+                if np.any(mask):
+                    min_dist[mask] = dist[mask]
+                    min_idx[mask] = c
+
+            assignments[i:end_idx] = min_idx
 
         return assignments.reshape(h, w)
 
-    # Weight computations and reconstruction
     def _compute_segment_weights(
         self,
         seg_means_lab: np.ndarray,
@@ -804,8 +788,6 @@ class SLICPosterizer:
             (img_rgb_u8.shape[1], img_rgb_u8.shape[0]),
             interpolation=cv2.INTER_LINEAR,
         )
-
-    # Output and visualization
 
     def _create_palette_swatch(
         self,
