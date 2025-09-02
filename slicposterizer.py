@@ -130,8 +130,6 @@ class SLICPosterizer:
         detail_blend_strength: float = 0.1,
         smoothing: int = 5,
         overlay_superpixels: bool = False,
-        chunk_size: int | None = None,
-        low_memory: bool = False,
     ) -> None:
         if num_colors < 2:
             raise ValueError("Number of colors must be at least 2.")
@@ -141,14 +139,6 @@ class SLICPosterizer:
 
         if not (0.01 <= edge_threshold <= 1.0):
             raise ValueError("edge_threshold must be between 0.01 and 1.0")
-
-        if low_memory:
-            logger.info("Low memory mode: reducing superpixels and colors")
-            num_superpixels = min(num_superpixels, 2000)
-            num_colors = min(num_colors, 50)
-            preserve_edges = False
-            overlay_superpixels = False
-            chunk_size = 128
 
         self.num_colors = num_colors
         self.blur_radius = blur_radius
@@ -160,8 +150,6 @@ class SLICPosterizer:
         self.detail_blend_strength = detail_blend_strength
         self.smoothing = smoothing
         self.overlay_superpixels = overlay_superpixels
-        self.chunk_size = chunk_size
-        self.low_memory = low_memory
 
     @log_method(log_time=True)
     def posterize(
@@ -207,12 +195,7 @@ class SLICPosterizer:
 
         original_shape = image.shape
         image = self.downsample_image(image)
-
-        if self.chunk_size:
-            posterized, palette, segments = self.process_chunked(image)
-        else:
-            posterized, palette, segments = self.process(image)
-
+        posterized, palette, segments = self.process(image)
         posterized = self.upsample_image(posterized, original_shape)
 
         if self.overlay_superpixels:
@@ -266,79 +249,6 @@ class SLICPosterizer:
 
         return posterized, palette_rgb, segments
 
-    @log_method(log_time=True)
-    def process_chunked(
-        self, image: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Posterization using SLIC superpixels, processed in chunks
-
-        This method performs the same task as `process` above, but divides
-        the image into chunks to reduce memory usage. To preserve colors accross
-        the image the segments and palette are processed prior to chunking.
-        """
-        img_rgb = self._preprocess(image)
-        del image
-        gc.collect()
-
-        h, w = img_rgb.shape[:2]
-        segments, palette_rgb, palette_lab = self._compute_segments_and_palette(img_rgb)
-
-        posterized = np.zeros_like(img_rgb, dtype=np.float32)
-        weights = np.zeros((h, w, len(palette_rgb)), dtype=np.float32)
-
-        chunks_h = (h + self.chunk_size - 1) // self.chunk_size
-        chunks_w = (w + self.chunk_size - 1) // self.chunk_size
-        total_chunks = chunks_h * chunks_w
-        processed_chunks = 0
-
-        for i in range(0, h, self.chunk_size):
-            for j in range(0, w, self.chunk_size):
-                end_i = min(i + self.chunk_size, h)
-                end_j = min(j + self.chunk_size, w)
-
-                chunk = img_rgb[i:end_i, j:end_j]
-                chunk_segments = segments[i:end_i, j:end_j]
-
-                chunk_simple_post, chunk_lab = self._simple_posterize(
-                    chunk, palette_lab, palette_rgb
-                )
-
-                if self.preserve_edges:
-                    chunk_simple_post = self._preserve_detail(
-                        chunk,
-                        chunk_lab,
-                        chunk_segments,
-                        palette_lab,
-                        palette_rgb,
-                        chunk_simple_post,
-                    )
-                    del chunk_lab
-
-                chunk_smooth = self._smooth(chunk_simple_post)
-                del chunk_simple_post
-
-                chunk_quantized = self._final_quantize(
-                    chunk_smooth, palette_lab, palette_rgb
-                )
-                del chunk_smooth
-
-                posterized[i:end_i, j:end_j] = chunk_quantized
-
-                del (
-                    chunk,
-                    chunk_segments,
-                    chunk_quantized,
-                )
-                processed_chunks += 1
-
-                if processed_chunks % max(1, total_chunks // 10) == 0:
-                    progress = processed_chunks / total_chunks
-                    logger.info(f"Chunk processing: {progress:.1%} complete")
-                    gc.collect()
-
-        return posterized, weights, palette_rgb, segments
-
-    # Image I/O and preprocessing
     def load_image(self, source: Path | Image.Image | str | None) -> np.ndarray:
         """
         Reads an image from the given file source, converting it into a standard
@@ -821,8 +731,6 @@ def posterize(
     palette_path: Path | str | None = None,
     quality: int = 95,
     overlay_superpixels: bool = False,
-    chunk_size: int | None = None,
-    low_memory: bool = False,
     strict_size: int | None = None,
 ):
     """
@@ -839,8 +747,6 @@ def posterize(
         detail_blend_strength=detail_blend_strength,
         smoothing=smoothing,
         overlay_superpixels=overlay_superpixels,
-        chunk_size=chunk_size,
-        low_memory=low_memory,
     )
 
     posterizer.posterize(
@@ -921,17 +827,6 @@ def main():
         help="Resize longest image dimension to this value, keeping aspect ratio (e.g. 1920)",
     )
 
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        help="Process image in chunks of this size for memory efficiency (enables chunked mode)",
-    )
-    parser.add_argument(
-        "--low-memory",
-        action="store_true",
-        help="Enable low memory mode (reduces superpixels and colors)",
-    )
-
     args = parser.parse_args()
 
     if not sys.stdin.isatty():
@@ -954,34 +849,23 @@ def main():
         input_data = args.input
         output_path = args.output
 
-    try:
-        posterize(
-            input_path=input_data,
-            output_path=output_path,
-            num_colors=args.colors,
-            blur_radius=args.blur,
-            edge_threshold=args.edge_threshold,
-            downsample_factor=args.downsample,
-            preserve_edges=not args.no_edge_preserve,
-            num_superpixels=args.superpixels,
-            superpixel_compactness=args.compactness,
-            detail_blend_strength=args.detail_blend,
-            smoothing=args.smoothing,
-            palette_path=args.palette,
-            quality=args.quality,
-            overlay_superpixels=args.overlay,
-            chunk_size=args.chunk_size,
-            low_memory=args.low_memory,
-            strict_size=args.strict_size,
-        )
-    except MemoryError:
-        logger.error(
-            "Out of memory! Try using --low-memory flag or --chunk-size for large images."
-        )
-        sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Processing interrupted by user.")
-        sys.exit(1)
+    posterize(
+        input_path=input_data,
+        output_path=output_path,
+        num_colors=args.colors,
+        blur_radius=args.blur,
+        edge_threshold=args.edge_threshold,
+        downsample_factor=args.downsample,
+        preserve_edges=not args.no_edge_preserve,
+        num_superpixels=args.superpixels,
+        superpixel_compactness=args.compactness,
+        detail_blend_strength=args.detail_blend,
+        smoothing=args.smoothing,
+        palette_path=args.palette,
+        quality=args.quality,
+        overlay_superpixels=args.overlay,
+        strict_size=args.strict_size,
+    )
 
 
 if __name__ == "__main__":
